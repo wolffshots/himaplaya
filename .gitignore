@@ -1,0 +1,10 @@
+# Compiled binary (same name as the module).
+/himaplaya
+
+# Go build and test output.
+*.exe
+*.test
+*.out
+
+# macOS
+.DS_Store
