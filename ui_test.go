@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -449,7 +450,8 @@ func TestSwitchAccount(t *testing.T) {
 		{"switch", tab, "work 0 false true"},
 		{"switch when busy", tab, "work 0 false true"},
 		{"next inbox", envelopesMsg{envelopes: []envelope{e}}, "work 1 false false"},
-		{"wrap", tab, "home 0 false true"},
+		{"cached", tab, "home 2 false false"},
+		{"cached again", tab, "work 1 false false"},
 	}
 	for _, s := range steps {
 		m, _ = m.Update(s.msg)
@@ -465,10 +467,29 @@ func TestSwitchAccount(t *testing.T) {
 		}
 	}
 
-	// The new inbox selects its first envelope.
+	// A cached inbox selects its first envelope.
+	for _, msg := range []tea.Msg{tab, tea.KeyMsg{Type: tea.KeyDown}, tab, tab} {
+		m, _ = m.Update(msg)
+	}
+	if got := m.(model).inbox.Cursor(); got != 0 || state(m) != "home 2 false false" {
+		t.Errorf("cached inbox: got cursor %d and %q", got, state(m))
+	}
+
+	// An old inbox is listed again, and the new inbox selects its first envelope.
+	cache := m.(model).cache
+	cache["work"] = cachedInbox{envelopes: cache["work"].envelopes, at: time.Now().Add(-inboxTTL)}
+	m, _ = m.Update(tab)
+	if got := state(m); got != "work 0 false true" {
+		t.Errorf("old inbox: got %q", got)
+	}
 	m, _ = m.Update(envelopesMsg{envelopes: []envelope{e, e}})
-	if got := m.(model).inbox.Cursor(); got != 0 {
-		t.Errorf("cursor after a switch: got %d, want 0", got)
+	if got := m.(model).inbox.Cursor(); got != 0 || state(m) != "work 2 false false" {
+		t.Errorf("new inbox: got cursor %d and %q", got, state(m))
+	}
+	// The refresh key lists a cached inbox again.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if got := state(m); got != "work 2 false true" {
+		t.Errorf("refresh: got %q", got)
 	}
 
 	// One account leaves the tab key off.

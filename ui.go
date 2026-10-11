@@ -149,6 +149,8 @@ type model struct {
 	plain     bool       // the reader shows the plain-text part, not the HTML part
 	stale     bool       // the reader content does not match doc, plain or the size
 
+	cache map[string]cachedInbox // the last inbox of each account, by account name
+
 	term    terminal
 	viewing bool   // the sixel view shows one image of doc
 	picture int    // the index of that image in doc.pictures
@@ -157,6 +159,15 @@ type model struct {
 	busy          bool // a himalaya call or an image fetch is in flight
 	err           error
 	width, height int
+}
+
+// inboxTTL is the time that an account switch can show a cached inbox.
+const inboxTTL = 5 * time.Minute
+
+// cachedInbox is the last inbox that himalaya listed for an account.
+type cachedInbox struct {
+	envelopes []envelope
+	at        time.Time
 }
 
 func newModel(t terminal) model {
@@ -171,6 +182,7 @@ func newModel(t terminal) model {
 		spin:   sp,
 		inbox:  newStyledTable(),
 		reader: viewport.New(0, 0),
+		cache:  map[string]cachedInbox{},
 		busy:   true, // startup lists the accounts, then the inbox
 	}
 }
@@ -283,14 +295,10 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		m.busy = false
 		m.err = msg.err
 		if msg.err == nil {
-			m.envelopes = msg.envelopes
-			rows := make([]table.Row, 0, len(m.envelopes))
-			for _, e := range m.envelopes {
-				rows = append(rows, table.Row{e.ID, oneLine(e.sender()), oneLine(e.Subject), shortDate(e.Date)})
-			}
-			m.inbox.SetRows(rows)
-			// The table has no cursor after an account switch empties it.
-			m.inbox.SetCursor(max(m.inbox.Cursor(), 0))
+			// A list only runs when the model is busy, and the account cannot
+			// change in that time.
+			m.cache[m.account] = cachedInbox{envelopes: msg.envelopes, at: time.Now()}
+			m.setEnvelopes(msg.envelopes)
 		}
 		return m, nil
 
@@ -318,6 +326,18 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		return m.handleKey(msg)
 	}
 	return m, nil
+}
+
+// setEnvelopes shows the envelopes in the inbox.
+func (m *model) setEnvelopes(envelopes []envelope) {
+	m.envelopes = envelopes
+	rows := make([]table.Row, 0, len(envelopes))
+	for _, e := range envelopes {
+		rows = append(rows, table.Row{e.ID, oneLine(e.sender()), oneLine(e.Subject), shortDate(e.Date)})
+	}
+	m.inbox.SetRows(rows)
+	// The table has no cursor after an account switch empties it.
+	m.inbox.SetCursor(max(m.inbox.Cursor(), 0))
 }
 
 func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
@@ -389,8 +409,12 @@ func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 		m.account = m.accounts[(slices.Index(m.accounts, m.account)+1)%len(m.accounts)]
 		// An envelope ID only applies to its account, so drop the old inbox.
-		m.doc, m.envelopes = nil, nil
-		m.inbox.SetRows(nil)
+		m.doc = nil
+		m.setEnvelopes(nil)
+		if c, ok := m.cache[m.account]; ok && time.Since(c.at) < inboxTTL {
+			m.setEnvelopes(c.envelopes)
+			return m, nil
+		}
 		m.busy = true
 		return m, tea.Batch(m.spin.Tick, listCmd(m.account))
 

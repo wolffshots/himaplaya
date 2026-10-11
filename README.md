@@ -46,6 +46,8 @@ At startup, himaplaya reads the accounts from `himalaya --json account list`. Th
 
 The `tab` key shows the inbox of the next account. It closes the open message. If the himalaya configuration has one account, the `tab` key does nothing.
 
+himaplaya keeps the last inbox of each account in memory for 5 minutes. In that time, the `tab` key shows the kept inbox and does not call himalaya. The `r` key always reads the inbox again.
+
 himaplaya passes the account to each himalaya command with the `--account` option. It shows one account at a time.
 
 ### Add an account
