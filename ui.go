@@ -2,7 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"image"
+	"maps"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -12,6 +17,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // ---- styles, reused from journalfix/ui.go ----------------------------------
@@ -48,6 +54,11 @@ type keyMap struct {
 	Open    key.Binding
 	Back    key.Binding
 	Refresh key.Binding
+	Plain   key.Binding
+	Images  key.Binding
+	Sixel   key.Binding
+	Prev    key.Binding
+	Next    key.Binding
 	Help    key.Binding
 	Quit    key.Binding
 }
@@ -57,17 +68,22 @@ func newKeyMap() keyMap {
 		Open:    key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
 		Back:    key.NewBinding(key.WithKeys("esc", "backspace"), key.WithHelp("esc", "back")),
 		Refresh: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+		Plain:   key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "text/html")),
+		Images:  key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "remote images")),
+		Sixel:   key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sixel view")),
+		Prev:    key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("left", "previous image")),
+		Next:    key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("right", "next image")),
 		Help:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Open, k.Back, k.Refresh, k.Help, k.Quit}
+	return []key.Binding{k.Open, k.Back, k.Refresh, k.Plain, k.Images, k.Sixel, k.Help, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Open, k.Back, k.Refresh}, {k.Help, k.Quit}}
+	return [][]key.Binding{{k.Open, k.Back, k.Refresh}, {k.Plain, k.Images}, {k.Sixel, k.Prev, k.Next}, {k.Help, k.Quit}}
 }
 
 // ---- table -----------------------------------------------------------------
@@ -122,19 +138,27 @@ type model struct {
 	reader viewport.Model
 
 	envelopes []envelope // ordered, mirrors inbox rows
-	open      *envelope  // the message in the reader. nil shows the inbox.
+	doc       *document  // the message in the reader. nil shows the inbox.
+	plain     bool       // the reader shows the plain-text part, not the HTML part
+	stale     bool       // the reader content does not match doc, plain or the size
 
-	busy          bool // a himalaya call is in flight
+	term    terminal
+	viewing bool   // the sixel view shows one image of doc
+	picture int    // the index of that image in doc.pictures
+	drawn   string // the body of the sixel view
+
+	busy          bool // a himalaya call or an image fetch is in flight
 	err           error
 	width, height int
 }
 
-func newModel() model {
+func newModel(t terminal) model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(accent)
 
 	return model{
+		term:   t,
 		keys:   newKeyMap(),
 		help:   help.New(),
 		spin:   sp,
@@ -156,9 +180,13 @@ type envelopesMsg struct {
 }
 
 type messageMsg struct {
-	envelope envelope
-	text     string
-	err      error
+	doc *document
+	err error
+}
+
+type imagesMsg struct {
+	id     string // the envelope that the images belong to
+	images map[string]image.Image
 }
 
 func listCmd() tea.Msg {
@@ -168,12 +196,20 @@ func listCmd() tea.Msg {
 	return envelopesMsg{envelopes: envelopes, err: err}
 }
 
-func readCmd(e envelope, width int) tea.Cmd {
+func readCmd(e envelope) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		text, err := readMessage(ctx, e.ID, width)
-		return messageMsg{envelope: e, text: text, err: err}
+		doc, err := readMessage(ctx, e)
+		return messageMsg{doc: doc, err: err}
+	}
+}
+
+func imagesCmd(id string, srcs []string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return imagesMsg{id: id, images: fetchImages(ctx, srcs)}
 	}
 }
 
@@ -183,7 +219,12 @@ func readCmd(e envelope, width int) tea.Cmd {
 // full help change the body height.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m, cmd := m.update(msg)
-	m.layout()
+	if m.layout() {
+		// Bubble Tea only writes the lines that changed, and a blank line that
+		// did not change keeps the pixels of the last sixel image. A clear
+		// makes Bubble Tea write every line.
+		cmd = tea.Batch(cmd, tea.ClearScreen)
+	}
 	return m, cmd
 }
 
@@ -219,10 +260,19 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		m.busy = false
 		m.err = msg.err
 		if msg.err == nil {
-			m.open = &msg.envelope
-			head := dimStyle.Render(oneLine(msg.envelope.sender()) + "  " + shortDate(msg.envelope.Date))
-			m.reader.SetContent(head + "\n\n" + msg.text)
+			m.doc = msg.doc
+			m.stale = true
 			m.reader.GotoTop()
+		}
+		return m, nil
+
+	case imagesMsg:
+		m.busy = false
+		// The user can open another message before the fetch ends.
+		if m.doc != nil && m.doc.envelope.ID == msg.id {
+			maps.Copy(m.doc.images, msg.images)
+			m.doc.remote = slices.DeleteFunc(m.doc.remote, func(src string) bool { return msg.images[src] != nil })
+			m.stale = true
 		}
 		return m, nil
 
@@ -233,6 +283,7 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 }
 
 func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
+	m.err = nil
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
@@ -240,10 +291,52 @@ func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
 		return m, nil
+	}
 
-	case key.Matches(msg, m.keys.Back):
-		m.open = nil
+	if m.viewing {
+		n := len(m.doc.pictures())
+		switch {
+		case key.Matches(msg, m.keys.Back), key.Matches(msg, m.keys.Sixel):
+			m.viewing = false
+			return m, tea.ClearScreen
+		case key.Matches(msg, m.keys.Prev):
+			m.picture = (m.picture + n - 1) % n
+			m.stale = true
+		case key.Matches(msg, m.keys.Next):
+			m.picture = (m.picture + 1) % n
+			m.stale = true
+		}
 		return m, nil
+	}
+
+	switch {
+	case key.Matches(msg, m.keys.Back):
+		m.doc = nil
+		return m, nil
+
+	case key.Matches(msg, m.keys.Sixel):
+		switch {
+		case m.doc == nil:
+		case !m.term.sixel:
+			m.err = errors.New("the terminal does not report sixel support")
+		case len(m.doc.pictures()) == 0:
+			m.err = errors.New("this message has no loaded image")
+		default:
+			m.viewing, m.picture, m.stale = true, 0, true
+		}
+		return m, nil
+
+	case key.Matches(msg, m.keys.Plain):
+		m.plain = !m.plain
+		m.stale = true
+		return m, nil
+
+	case key.Matches(msg, m.keys.Images):
+		if m.busy || m.doc == nil || len(m.doc.remote) == 0 {
+			return m, nil
+		}
+		m.busy = true
+		return m, tea.Batch(m.spin.Tick, imagesCmd(m.doc.envelope.ID, m.doc.remote))
 
 	case key.Matches(msg, m.keys.Refresh):
 		if m.busy {
@@ -254,16 +347,15 @@ func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Open):
 		i := m.inbox.Cursor()
-		if m.busy || m.open != nil || i < 0 || i >= len(m.envelopes) {
+		if m.busy || m.doc != nil || i < 0 || i >= len(m.envelopes) {
 			return m, nil
 		}
 		m.busy = true
-		// hread renders at 100 columns. A narrow pane gets its own width.
-		return m, tea.Batch(m.spin.Tick, readCmd(m.envelopes[i], min(m.reader.Width, 100)))
+		return m, tea.Batch(m.spin.Tick, readCmd(m.envelopes[i]))
 	}
 
 	var cmd tea.Cmd
-	if m.open != nil {
+	if m.doc != nil {
 		m.reader, cmd = m.reader.Update(msg)
 	} else {
 		m.inbox, cmd = m.inbox.Update(msg)
@@ -280,9 +372,12 @@ func (m model) View() string {
 	top, banner, bottom, _ := m.chrome()
 
 	var body string
-	if m.open != nil {
+	if m.viewing {
+		title := fmt.Sprintf("Image %d of %d", m.picture+1, len(m.doc.pictures()))
+		body = frame(titleStyle.Render(title), m.drawn, m.width)
+	} else if m.doc != nil {
 		// 6 leaves room for the frame corners, the spaces and one rule column.
-		title := titleStyle.MaxWidth(max(m.width-6, 1)).Render(oneLine(m.open.Subject))
+		title := titleStyle.MaxWidth(max(m.width-6, 1)).Render(oneLine(m.doc.envelope.Subject))
 		body = frame(title, m.reader.View(), m.width)
 	} else {
 		body = frame(titleStyle.Render(fmt.Sprintf("Inbox (%d)", len(m.envelopes))), m.inbox.View(), m.width)
@@ -315,9 +410,11 @@ func (m model) chrome() (top, banner, bottom string, bodyH int) {
 	return top, banner, bottom, max(bodyH, 3)
 }
 
-func (m *model) layout() {
+// layout sizes the panes and renders the content that is stale. It reports
+// whether it drew a new sixel image.
+func (m *model) layout() (drew bool) {
 	if m.width == 0 {
-		return
+		return false
 	}
 	w := max(m.width-frameCols, 10)
 	_, _, _, bodyH := m.chrome()
@@ -326,6 +423,90 @@ func (m *model) layout() {
 	m.inbox.SetColumns(inboxColumns(w))
 	m.inbox.SetWidth(w)
 	m.inbox.SetHeight(h)
+	if m.reader.Width != w || m.reader.Height != h {
+		m.stale = true
+	}
 	m.reader.Width = w
 	m.reader.Height = h
+	if m.doc == nil || !m.stale {
+		return false
+	}
+	m.stale = false
+	m.reader.SetContent(m.readerContent())
+	if m.viewing {
+		m.drawn = m.sixelView(w, h)
+	}
+	return m.viewing
+}
+
+// sixelView draws the selected image in an area of cols by rows cells. The
+// first row is a caption. The image keeps its size, unless it must shrink to
+// fit.
+//
+// ponytail: the view starts at the first image and shows one image at a time.
+// The upgrade path is to start at the image that the reader shows.
+func (m model) sixelView(cols, rows int) string {
+	f := m.doc.pictures()[m.picture]
+	img := m.doc.images[f.src]
+	size := img.Bounds().Size()
+	caption := dimStyle.Render(fmt.Sprintf("%d x %d px", size.X, size.Y))
+	if f.href != "" {
+		text := ansi.Truncate(f.href, max(cols-lipgloss.Width(caption)-2, 0), "…")
+		caption += "  " + hyperlink(f.href, titleStyle.Underline(true).Render(text))
+	}
+
+	w, h := size.X, size.Y
+	if maxW := cols * m.term.cell.X; w > maxW {
+		w, h = maxW, h*maxW/w
+	}
+	if maxH := (rows - 1) * m.term.cell.Y; h > maxH {
+		w, h = w*maxH/h, maxH
+	}
+	w, h = max(w, 1), max(h, 1)
+	used := (h + m.term.cell.Y - 1) / m.term.cell.Y // the rows that the image covers
+
+	// A sixel image is one escape sequence that draws down from the cursor.
+	// Bubble Tea writes the lines from the top, and a blank line that it
+	// writes after the image erases the pixels in that row. So the sequence
+	// is at the end of the last row of the image: it saves the cursor, moves
+	// to the first cell of the image, draws, and restores the cursor. The
+	// spaces before it give the line its full width, so that the frame adds
+	// no padding over the image.
+	draw := strings.Repeat(" ", cols) + "\x1b7" + fmt.Sprintf("\x1b[%dD", cols)
+	if used > 1 {
+		draw += fmt.Sprintf("\x1b[%dA", used-1)
+	}
+	draw += sixel(img, w, h) + "\x1b8"
+
+	lines := make([]string, rows)
+	lines[0] = caption
+	lines[min(used, rows-1)] = draw
+	return strings.Join(lines, "\n")
+}
+
+// readerContent renders the open message for the reader width. It shows the
+// HTML part, unless the user asked for plain text or the message has no HTML
+// part.
+func (m model) readerContent() string {
+	d := m.doc
+	// 100 columns is the widest line that reads well, and the width that hread uses.
+	w := min(m.reader.Width, 100)
+	head := oneLine(d.envelope.sender()) + "  " + shortDate(d.envelope.Date)
+
+	var body string
+	switch {
+	case d.root != nil && !m.plain:
+		body = renderHTML(d.root, w, d.images)
+		if n := len(d.remote); n > 0 {
+			head += fmt.Sprintf("  %d remote images, i to load", n)
+		}
+	case d.text != "":
+		head += "  plain text"
+		body = ansi.Wrap(d.text, w, "")
+	default:
+		// The message has no plain-text part, so remove the styles from the HTML part.
+		head += "  plain text"
+		body = ansi.Strip(renderHTML(d.root, w, nil))
+	}
+	return dimStyle.Render(head) + "\n\n" + body
 }
