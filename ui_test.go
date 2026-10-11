@@ -420,6 +420,67 @@ func TestViewFitsWindow(t *testing.T) {
 	}
 }
 
+// The tab key shows the inbox of the next account. An envelope of the last
+// account must not stay open or stay in the inbox.
+func TestSwitchAccount(t *testing.T) {
+	const w, h = 80, 24
+	e := envelope{ID: "1", Subject: "from home"}
+	tab := tea.KeyMsg{Type: tea.KeyTab}
+	state := func(m tea.Model) string {
+		mm := m.(model)
+		return fmt.Sprintf("%s %d %v %v", mm.account, len(mm.envelopes), mm.doc != nil, mm.busy)
+	}
+
+	var m tea.Model = newModel(terminal{})
+	m, _ = m.Update(tea.WindowSizeMsg{Width: w, Height: h})
+	m, _ = m.Update(tab)
+	if got := state(m); got != " 0 false true" {
+		t.Errorf("tab before the accounts load: got %q", got)
+	}
+
+	steps := []struct {
+		name string
+		msg  tea.Msg
+		want string // the account, the envelope count, an open message, busy
+	}{
+		{"accounts", accountsMsg{accounts: []account{{Name: "work"}, {Name: "home", Default: true}}}, "home 0 false true"},
+		{"inbox", envelopesMsg{envelopes: []envelope{e, e}}, "home 2 false false"},
+		{"reader", messageMsg{doc: &document{envelope: e, text: "hi"}}, "home 2 true false"},
+		{"switch", tab, "work 0 false true"},
+		{"switch when busy", tab, "work 0 false true"},
+		{"next inbox", envelopesMsg{envelopes: []envelope{e}}, "work 1 false false"},
+		{"wrap", tab, "home 0 false true"},
+	}
+	for _, s := range steps {
+		m, _ = m.Update(s.msg)
+		if got := state(m); got != s.want {
+			t.Errorf("%s: got %q, want %q", s.name, got, s.want)
+		}
+		view := ansi.Strip(m.View())
+		if got := lipgloss.Height(view); got != h {
+			t.Errorf("%s: view is %d rows, want %d", s.name, got, h)
+		}
+		if !strings.Contains(view, "work") || !strings.Contains(view, "home") {
+			t.Errorf("%s: the tab bar does not show both accounts", s.name)
+		}
+	}
+
+	// The new inbox selects its first envelope.
+	m, _ = m.Update(envelopesMsg{envelopes: []envelope{e, e}})
+	if got := m.(model).inbox.Cursor(); got != 0 {
+		t.Errorf("cursor after a switch: got %d, want 0", got)
+	}
+
+	// One account leaves the tab key off.
+	m = newModel(terminal{})
+	for _, msg := range []tea.Msg{accountsMsg{accounts: []account{{Name: "home", Default: true}}}, envelopesMsg{}, tab} {
+		m, _ = m.Update(msg)
+	}
+	if got := state(m); got != "home 0 false false" {
+		t.Errorf("tab with one account: got %q", got)
+	}
+}
+
 // checkSixelView checks that the image fits the frame of the sixel view. The
 // draw sequence must start at the first cell of the image and stay above the
 // footer.

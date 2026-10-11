@@ -35,6 +35,8 @@ var (
 			Bold(true).
 			Padding(0, 2)
 
+	tabStyle = lipgloss.NewStyle().Foreground(dim).Padding(0, 2)
+
 	tabBarStyle = lipgloss.NewStyle().Padding(0, 0, 1, 0)
 
 	titleStyle = lipgloss.NewStyle().Foreground(accent).Bold(true)
@@ -54,6 +56,7 @@ type keyMap struct {
 	Open    key.Binding
 	Back    key.Binding
 	Refresh key.Binding
+	Account key.Binding
 	Plain   key.Binding
 	Images  key.Binding
 	Sixel   key.Binding
@@ -68,6 +71,8 @@ func newKeyMap() keyMap {
 		Open:    key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
 		Back:    key.NewBinding(key.WithKeys("esc", "backspace"), key.WithHelp("esc", "back")),
 		Refresh: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+		// The binding is on when himalaya lists more than one account.
+		Account: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next account"), key.WithDisabled()),
 		Plain:   key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "text/html")),
 		Images:  key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "remote images")),
 		Sixel:   key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sixel view")),
@@ -79,11 +84,11 @@ func newKeyMap() keyMap {
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Open, k.Back, k.Refresh, k.Plain, k.Images, k.Sixel, k.Help, k.Quit}
+	return []key.Binding{k.Open, k.Back, k.Refresh, k.Account, k.Plain, k.Images, k.Sixel, k.Help, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Open, k.Back, k.Refresh}, {k.Plain, k.Images}, {k.Sixel, k.Prev, k.Next}, {k.Help, k.Quit}}
+	return [][]key.Binding{{k.Open, k.Back, k.Refresh}, {k.Plain, k.Images}, {k.Sixel, k.Prev, k.Next}, {k.Account, k.Help, k.Quit}}
 }
 
 // ---- table -----------------------------------------------------------------
@@ -137,6 +142,8 @@ type model struct {
 	inbox  table.Model
 	reader viewport.Model
 
+	accounts  []string   // the account names of the himalaya configuration
+	account   string     // the account that the inbox shows. Empty is the default account.
 	envelopes []envelope // ordered, mirrors inbox rows
 	doc       *document  // the message in the reader. nil shows the inbox.
 	plain     bool       // the reader shows the plain-text part, not the HTML part
@@ -164,15 +171,20 @@ func newModel(t terminal) model {
 		spin:   sp,
 		inbox:  newStyledTable(),
 		reader: viewport.New(0, 0),
-		busy:   true, // startup lists the inbox
+		busy:   true, // startup lists the accounts, then the inbox
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.spin.Tick, listCmd)
+	return tea.Batch(m.spin.Tick, accountsCmd)
 }
 
 // ---- messages and commands -------------------------------------------------
+
+type accountsMsg struct {
+	accounts []account
+	err      error
+}
 
 type envelopesMsg struct {
 	envelopes []envelope
@@ -189,18 +201,27 @@ type imagesMsg struct {
 	images map[string]image.Image
 }
 
-func listCmd() tea.Msg {
+func accountsCmd() tea.Msg {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	envelopes, err := listEnvelopes(ctx)
-	return envelopesMsg{envelopes: envelopes, err: err}
+	accounts, err := listAccounts(ctx)
+	return accountsMsg{accounts: accounts, err: err}
 }
 
-func readCmd(e envelope) tea.Cmd {
+func listCmd(account string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		doc, err := readMessage(ctx, e)
+		envelopes, err := listEnvelopes(ctx, account)
+		return envelopesMsg{envelopes: envelopes, err: err}
+	}
+}
+
+func readCmd(account string, e envelope) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		doc, err := readMessage(ctx, account, e)
 		return messageMsg{doc: doc, err: err}
 	}
 }
@@ -243,6 +264,21 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
 
+	case accountsMsg:
+		m.err = msg.err
+		if msg.err != nil {
+			m.busy = false
+			return m, nil
+		}
+		for _, a := range msg.accounts {
+			m.accounts = append(m.accounts, a.Name)
+			if a.Default {
+				m.account = a.Name
+			}
+		}
+		m.keys.Account.SetEnabled(len(m.accounts) > 1)
+		return m, listCmd(m.account)
+
 	case envelopesMsg:
 		m.busy = false
 		m.err = msg.err
@@ -253,6 +289,8 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 				rows = append(rows, table.Row{e.ID, oneLine(e.sender()), oneLine(e.Subject), shortDate(e.Date)})
 			}
 			m.inbox.SetRows(rows)
+			// The table has no cursor after an account switch empties it.
+			m.inbox.SetCursor(max(m.inbox.Cursor(), 0))
 		}
 		return m, nil
 
@@ -343,7 +381,18 @@ func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, nil
 		}
 		m.busy = true
-		return m, tea.Batch(m.spin.Tick, listCmd)
+		return m, tea.Batch(m.spin.Tick, listCmd(m.account))
+
+	case key.Matches(msg, m.keys.Account):
+		if m.busy {
+			return m, nil
+		}
+		m.account = m.accounts[(slices.Index(m.accounts, m.account)+1)%len(m.accounts)]
+		// An envelope ID only applies to its account, so drop the old inbox.
+		m.doc, m.envelopes = nil, nil
+		m.inbox.SetRows(nil)
+		m.busy = true
+		return m, tea.Batch(m.spin.Tick, listCmd(m.account))
 
 	case key.Matches(msg, m.keys.Open):
 		i := m.inbox.Cursor()
@@ -351,7 +400,7 @@ func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, nil
 		}
 		m.busy = true
-		return m, tea.Batch(m.spin.Tick, readCmd(m.envelopes[i]))
+		return m, tea.Batch(m.spin.Tick, readCmd(m.account, m.envelopes[i]))
 	}
 
 	var cmd tea.Cmd
@@ -394,7 +443,17 @@ func (m model) View() string {
 // chrome renders everything around the body, and returns the height that is
 // left for the body.
 func (m model) chrome() (top, banner, bottom string, bodyH int) {
-	bar := tabActiveStyle.Render("himaplaya")
+	var bar string
+	for _, a := range m.accounts {
+		style := tabStyle
+		if a == m.account {
+			style = tabActiveStyle
+		}
+		bar += style.Render(a)
+	}
+	if bar == "" {
+		bar = tabActiveStyle.Render("himaplaya")
+	}
 	if m.busy {
 		bar += "  " + m.spin.View()
 	}

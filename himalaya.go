@@ -123,9 +123,20 @@ func (d *document) pictures() []figure {
 	return out
 }
 
-// himalaya runs himalaya with JSON output and decodes stdout into out.
-func himalaya(ctx context.Context, out any, args ...string) error {
-	stdout, err := exec.CommandContext(ctx, "himalaya", append([]string{"--json"}, args...)...).Output()
+// account is an entry of `himalaya --json account list`.
+type account struct {
+	Name    string `json:"name"`
+	Default bool   `json:"default"`
+}
+
+// himalaya runs himalaya with JSON output and decodes stdout into out. An empty
+// account is the default account of the himalaya configuration.
+func himalaya(ctx context.Context, out any, account string, args ...string) error {
+	args = append([]string{"--json"}, args...)
+	if account != "" {
+		args = append(args, "--account", account)
+	}
+	stdout, err := exec.CommandContext(ctx, "himalaya", args...).Output()
 	if err != nil {
 		// With --json, himalaya reports a failure as {"error": "..."}.
 		var fail struct {
@@ -144,19 +155,27 @@ func himalaya(ctx context.Context, out any, args ...string) error {
 	return json.Unmarshal(stdout, out)
 }
 
-func listEnvelopes(ctx context.Context) ([]envelope, error) {
+func listAccounts(ctx context.Context) ([]account, error) {
+	var out struct {
+		Accounts []account `json:"accounts"`
+	}
+	err := himalaya(ctx, &out, "", "account", "list")
+	return out.Accounts, err
+}
+
+func listEnvelopes(ctx context.Context, account string) ([]envelope, error) {
 	var out struct {
 		Envelopes []envelope `json:"envelopes"`
 	}
-	err := himalaya(ctx, &out, "envelope", "list")
+	err := himalaya(ctx, &out, account, "envelope", "list")
 	return out.Envelopes, err
 }
 
 // readMessage reads a message and prepares it for the reader. The read does not
 // mark the message as seen.
-func readMessage(ctx context.Context, e envelope) (*document, error) {
+func readMessage(ctx context.Context, account string, e envelope) (*document, error) {
 	var m message
-	if err := himalaya(ctx, &m, "message", "read", e.ID); err != nil {
+	if err := himalaya(ctx, &m, account, "message", "read", e.ID); err != nil {
 		return nil, err
 	}
 	return newDocument(e, m)
