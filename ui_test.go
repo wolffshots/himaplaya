@@ -492,6 +492,19 @@ func TestSwitchAccount(t *testing.T) {
 		t.Errorf("refresh: got %q", got)
 	}
 
+	// The shift+tab key shows the previous account, and goes from the first
+	// account to the last.
+	back := tea.KeyMsg{Type: tea.KeyShiftTab}
+	m = newModel(terminal{})
+	m, _ = m.Update(accountsMsg{accounts: []account{{Name: "a"}, {Name: "b", Default: true}, {Name: "c"}}})
+	for _, want := range []string{"a", "c", "b"} {
+		m, _ = m.Update(envelopesMsg{})
+		m, _ = m.Update(back)
+		if got := m.(model).account; got != want {
+			t.Errorf("shift+tab: got account %q, want %q", got, want)
+		}
+	}
+
 	// One account leaves the tab key off.
 	m = newModel(terminal{})
 	for _, msg := range []tea.Msg{accountsMsg{accounts: []account{{Name: "home", Default: true}}}, envelopesMsg{}, tab} {

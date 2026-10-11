@@ -23,6 +23,7 @@ go run .
 | `esc` | Go back to the inbox |
 | `r` | Refresh the inbox |
 | `tab` | Show the inbox of the next account |
+| `shift+tab` | Show the inbox of the previous account |
 | `t` | Switch between the HTML part and the plain-text part |
 | `i` | Load the remote images of the open message |
 | `s` | Open or close the sixel view of the open message |
@@ -44,9 +45,9 @@ The `t` key shows the plain-text part. If the message has no plain-text part, hi
 
 At startup, himaplaya reads the accounts from `himalaya --json account list`. The tab bar shows one tab for each account. The first inbox is the inbox of the default account.
 
-The `tab` key shows the inbox of the next account. It closes the open message. If the himalaya configuration has one account, the `tab` key does nothing.
+The `tab` key shows the inbox of the next account, and the `shift+tab` key shows the inbox of the previous account. Each key closes the open message. If the himalaya configuration has one account, the keys do nothing.
 
-himaplaya keeps the last inbox of each account in memory for 5 minutes. In that time, the `tab` key shows the kept inbox and does not call himalaya. The `r` key always reads the inbox again.
+himaplaya keeps the last inbox of each account in memory for 5 minutes. In that time, an account switch shows the kept inbox and does not call himalaya. The `r` key always reads the inbox again.
 
 himaplaya passes the account to each himalaya command with the `--account` option. It shows one account at a time.
 

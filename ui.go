@@ -71,8 +71,10 @@ func newKeyMap() keyMap {
 		Open:    key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
 		Back:    key.NewBinding(key.WithKeys("esc", "backspace"), key.WithHelp("esc", "back")),
 		Refresh: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
-		// The binding is on when himalaya lists more than one account.
-		Account: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next account"), key.WithDisabled()),
+		// The binding is on when himalaya lists more than one account. The
+		// shift+tab key goes to the previous account. The help does not show
+		// it, because the full help has no room for it at 80 columns.
+		Account: key.NewBinding(key.WithKeys("tab", "shift+tab"), key.WithHelp("tab", "next account"), key.WithDisabled()),
 		Plain:   key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "text/html")),
 		Images:  key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "remote images")),
 		Sixel:   key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sixel view")),
@@ -407,7 +409,11 @@ func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		if m.busy {
 			return m, nil
 		}
-		m.account = m.accounts[(slices.Index(m.accounts, m.account)+1)%len(m.accounts)]
+		step := 1
+		if msg.Type == tea.KeyShiftTab {
+			step = len(m.accounts) - 1
+		}
+		m.account = m.accounts[(slices.Index(m.accounts, m.account)+step)%len(m.accounts)]
 		// An envelope ID only applies to its account, so drop the old inbox.
 		m.doc = nil
 		m.setEnvelopes(nil)
