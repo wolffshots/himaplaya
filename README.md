@@ -25,7 +25,7 @@ scoop bucket add wolffshots https://github.com/wolffshots/scoop-bucket
 scoop install wolffshots/himaplaya
 ```
 
-The manifest installs the release binary through [wolffshots/scoop-bucket](https://github.com/wolffshots/scoop-bucket). It does not install `himalaya`.
+The manifest installs the release binary through [wolffshots/scoop-bucket](https://github.com/wolffshots/scoop-bucket). It also installs `himalaya`.
 
 ### From source
 
