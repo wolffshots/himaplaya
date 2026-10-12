@@ -18,14 +18,20 @@ import (
 type terminal struct {
 	cell  image.Point // the size of one character cell, in pixels
 	sixel bool        // the terminal reports sixel support
+	kitty bool        // the terminal shows the Unicode placeholders of the Kitty graphics protocol
 }
 
 var (
 	cellSizeRe = regexp.MustCompile(`\x1b\[6;(\d+);(\d+)t`)
 	attrsRe    = regexp.MustCompile(`\x1b\[\?([\d;]*)c`)
+	// ponytail: the Kitty graphics protocol has no request for placeholder
+	// support, so this is a list of names. kitty before 0.28 is in the list
+	// and has no placeholders. The upgrade path is a check of the version.
+	nameRe = regexp.MustCompile(`\x1bP>\|(kitty|ghostty)`)
 )
 
-// queryTerminal asks the terminal for its cell size and its device attributes.
+// queryTerminal asks the terminal for its name, its cell size and its device
+// attributes.
 // Call it before Bubble Tea starts, because Bubble Tea reads a reply as key
 // presses.
 func queryTerminal() terminal {
@@ -45,9 +51,10 @@ func queryTerminal() terminal {
 		defer restore()
 	}
 
-	// CSI 16 t asks for the cell size. CSI c asks for the device attributes.
-	// Every terminal answers the second request, so the read stops there.
-	os.Stdout.WriteString("\x1b[16t\x1b[c")
+	// CSI > q asks for the name. CSI 16 t asks for the cell size. CSI c asks
+	// for the device attributes. Every terminal answers the last request, so
+	// the read stops there.
+	os.Stdout.WriteString("\x1b[>q\x1b[16t\x1b[c")
 
 	reply := make(chan []byte, 1)
 	var stop atomic.Bool
@@ -88,5 +95,6 @@ func parseTerminal(t terminal, reply []byte) terminal {
 	if m := attrsRe.FindSubmatch(reply); m != nil {
 		t.sixel = slices.Contains(strings.Split(string(m[1]), ";"), "4")
 	}
+	t.kitty = nameRe.Match(reply)
 	return t
 }

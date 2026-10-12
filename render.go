@@ -14,12 +14,13 @@ import (
 
 // renderHTML draws an HTML document as styled text that fits the given width.
 // It draws each image in images in place. Any other image shows its alt text.
+// A nil k draws an image as half blocks.
 //
 // ponytail: this styles a fixed set of tags and ignores the CSS of the mail, so
 // the colors of the mail do not show. The upgrade path is an external ANSI
 // renderer behind this function, for example elinks -dump-color-mode.
-func renderHTML(root *html.Node, width int, images map[string]image.Image) string {
-	r := &renderer{width: width, images: images}
+func renderHTML(root *html.Node, width int, images map[string]image.Image, k *kitty) string {
+	r := &renderer{width: width, images: images, kitty: k}
 	r.node(root, lipgloss.NewStyle(), "")
 	if r.col > 0 {
 		r.newline()
@@ -30,6 +31,7 @@ func renderHTML(root *html.Node, width int, images map[string]image.Image) strin
 type renderer struct {
 	width  int
 	images map[string]image.Image
+	kitty  *kitty // draws the images. nil draws half blocks.
 
 	lines   []string        // the finished lines
 	cur     strings.Builder // the line in progress
@@ -167,8 +169,9 @@ func (r *renderer) word(w string, st lipgloss.Style, href string) {
 	}
 }
 
-// img draws a loaded image as half blocks. It shows the alt text of an image
-// that is not loaded. Both are a link when the image is in a link.
+// img draws a loaded image as half blocks or as Kitty placeholders. It shows
+// the alt text of an image that is not loaded. Both are a link when the image
+// is in a link.
 func (r *renderer) img(n *html.Node, href string) {
 	// A size below 8 pixels is a tracker or a spacer.
 	w, wErr := strconv.Atoi(attr(n, "width"))
@@ -177,7 +180,8 @@ func (r *renderer) img(n *html.Node, href string) {
 		return
 	}
 
-	img := r.images[attr(n, "src")]
+	src := attr(n, "src")
+	img := r.images[src]
 	if img == nil {
 		alt, st := oneLine(attr(n, "alt")), dimStyle
 		if href != "" {
@@ -202,7 +206,13 @@ func (r *renderer) img(n *html.Node, href string) {
 	}
 	r.block(1)
 	r.flush()
-	for _, line := range halfBlocks(img, cols) {
+	var lines []string
+	if r.kitty != nil {
+		lines = r.kitty.lines(src, img, cols)
+	} else {
+		lines = halfBlocks(img, cols)
+	}
+	for _, line := range lines {
 		r.lines = append(r.lines, r.indent+hyperlink(href, line))
 	}
 	r.block(1)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -104,7 +106,7 @@ func TestRenderHTML(t *testing.T) {
 		<img src="https://example.com/pixel.gif" width="1" height="1" alt="pixel">
 		</body></html>`
 	const width = 20
-	out := renderHTML(parse(t, in), width, nil)
+	out := renderHTML(parse(t, in), width, nil, nil)
 
 	want := strings.Join([]string{
 		"Title",
@@ -142,7 +144,7 @@ func TestRenderHTML(t *testing.T) {
 }
 
 func TestRenderHTMLCutsLongWord(t *testing.T) {
-	got := renderHTML(parse(t, "<p>ab abcdefghij</p>"), 4, nil)
+	got := renderHTML(parse(t, "<p>ab abcdefghij</p>"), 4, nil, nil)
 	if want := "ab\nabcd\nefgh\nij"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -282,6 +284,168 @@ func TestParseTerminal(t *testing.T) {
 	if got := parseTerminal(base, []byte("\x1b[?1;14c")); got != base {
 		t.Errorf("without sixel: got %+v", got)
 	}
+	if got := parseTerminal(base, []byte("\x1bP>|ghostty 1.2.0\x1b\\\x1b[6;36;17t\x1b[?62;22c")); got != (terminal{cell: image.Pt(17, 36), kitty: true}) {
+		t.Errorf("ghostty: got %+v", got)
+	}
+	// tmux needs a wrapper around each Kitty command, so it gets half blocks.
+	if got := parseTerminal(base, []byte("\x1bP>|tmux 3.5a\x1b\\\x1b[?1;2c")); got != base {
+		t.Errorf("tmux: got %+v", got)
+	}
+}
+
+func TestKitty(t *testing.T) {
+	// Noise does not compress, so the image needs more than one command.
+	img := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	seed := uint32(1)
+	for i := range img.Pix {
+		seed = seed*1664525 + 1013904223
+		img.Pix[i] = uint8(seed >> 24)
+		if i%4 == 3 {
+			img.Pix[i] = 255
+		}
+	}
+	var out bytes.Buffer
+	k := &kitty{cell: image.Pt(10, 20), ids: map[string]int{}, out: &out}
+
+	// 7 columns are 70 pixels. The image is square, so it takes 4 rows. The
+	// terminal makes the image larger, so the data keeps the 64 pixels.
+	lines := k.lines("a", img, 7)
+	if len(lines) != 4 {
+		t.Fatalf("got %d lines, want 4", len(lines))
+	}
+	// These are the first 4 row diacritics of the protocol.
+	for y, d := range []rune{0x305, 0x30d, 0x30e, 0x310} {
+		want := "\x1b[38;2;0;0;1m" + placeholder + string(d) + strings.Repeat(placeholder, 6) + "\x1b[0m"
+		if lines[y] != want {
+			t.Errorf("line %d: got %q, want %q", y, lines[y], want)
+		}
+		if got := ansi.StringWidth(lines[y]); got != 7 {
+			t.Errorf("line %d is %d columns, want 7", y, got)
+		}
+	}
+
+	cmds := strings.Split(strings.TrimSuffix(out.String(), "\x1b\\"), "\x1b\\")
+	if len(cmds) < 4 {
+		t.Fatalf("got %d commands, want 3 or more with data and 1 placement", len(cmds))
+	}
+	var data string
+	for i, cmd := range cmds {
+		keys, chunk, _ := strings.Cut(strings.TrimPrefix(cmd, "\x1b_G"), ";")
+		wantKeys := "m=1"
+		switch i {
+		case 0:
+			wantKeys = "a=t,i=1,f=24,s=64,v=64,o=z,q=2,m=1"
+		case len(cmds) - 2:
+			wantKeys = "m=0"
+		case len(cmds) - 1:
+			wantKeys = "a=p,U=1,i=1,p=1,c=7,r=4,q=2"
+		}
+		if keys != wantKeys || len(chunk) > 4096 {
+			t.Errorf("command %d: got keys %q and %d bytes of data, want keys %q", i, keys, len(chunk), wantKeys)
+		}
+		data += chunk
+	}
+	raw, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	z, err := zlib.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(z)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var px []byte
+	for _, p := range scale(img, 64, 64) {
+		px = append(px, p[:]...)
+	}
+	if !bytes.Equal(got, px) {
+		t.Errorf("the data is %d bytes and is not the %d bytes of the pixels", len(got), len(px))
+	}
+
+	// The terminal has the image, so the next draw only sends a placement.
+	out.Reset()
+	k.lines("a", img, 2)
+	if got, want := out.String(), "\x1b_Ga=p,U=1,i=1,p=1,c=2,r=1,q=2\x1b\\"; got != want {
+		t.Errorf("second draw: got %q, want %q", got, want)
+	}
+
+	// An image that needs more than 297 rows must shrink.
+	lines = k.lines("b", image.NewRGBA(image.Rect(0, 0, 8, 8000)), 10)
+	if len(lines) != 297 || ansi.StringWidth(lines[296]) != 1 || !strings.HasSuffix(out.String(), "\x1b_Ga=p,U=1,i=2,p=1,c=1,r=297,q=2\x1b\\") {
+		t.Errorf("tall image: got %d lines and the commands end with %q", len(lines), out.String()[max(out.Len()-40, 0):])
+	}
+
+	out.Reset()
+	k.forget()
+	for _, want := range []string{"\x1b_Ga=d,d=I,i=1,q=2\x1b\\", "\x1b_Ga=d,d=I,i=2,q=2\x1b\\"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("forget: got %q, want %q in it", out.String(), want)
+		}
+	}
+	if len(k.ids) != 0 {
+		t.Errorf("forget: %d images stay", len(k.ids))
+	}
+}
+
+// A terminal with Kitty placeholders shows an image in the reader at the full
+// resolution, so it has no sixel view.
+func TestKittyReader(t *testing.T) {
+	const w, h = 80, 24
+	img, err := decodeImage(testPNG(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := &document{
+		envelope: envelope{ID: "1"},
+		root:     parse(t, `<p>before</p><a href="https://example.com/go"><img src="cid:a"></a><p>after</p>`),
+		images:   map[string]image.Image{"cid:a": img},
+	}
+	var out bytes.Buffer
+	start := newModel(terminal{cell: image.Pt(10, 20), kitty: true})
+	start.kitty.out = &out
+	var m tea.Model = start
+
+	steps := []struct {
+		name string
+		msg  tea.Msg
+		view string // text that the view must show
+		sent string // text that the commands must have. Empty means no command.
+	}{
+		{"size", tea.WindowSizeMsg{Width: w, Height: h}, "Inbox (0)", ""},
+		// The 16 pixel image is 2 columns and 1 row. It is a link.
+		{"reader", messageMsg{doc: doc}, "\x1b]8;;https://example.com/go\x1b\\\x1b[38;2;0;0;1m" + placeholder + string(rune(0x305)) + placeholder + "\x1b[0m", "a=t,i=1,f=24,s=16,v=16,"},
+		{"resize", tea.WindowSizeMsg{Width: 60, Height: h}, placeholder, "\x1b_Ga=p,U=1,i=1,p=1,c=2,r=1,q=2\x1b\\"},
+		// The error banner changes the size of the reader, so the reader draws again.
+		{"no sixel view", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")}, "already shows each image", "\x1b_Ga=p,U=1,i=1,p=1,c=2,r=1,q=2\x1b\\"},
+		{"inbox", tea.KeyMsg{Type: tea.KeyEsc}, "Inbox (0)", "\x1b_Ga=d,d=I,i=1,q=2\x1b\\"},
+	}
+	width := w
+	for _, s := range steps {
+		if size, ok := s.msg.(tea.WindowSizeMsg); ok {
+			width = size.Width
+		}
+		out.Reset()
+		m, _ = m.Update(s.msg)
+		view := m.View()
+		if got := lipgloss.Height(view); got != h {
+			t.Errorf("%s: view is %d rows, want %d", s.name, got, h)
+		}
+		if got := lipgloss.Width(view); got > width {
+			t.Errorf("%s: view is %d columns, want at most %d", s.name, got, width)
+		}
+		if !strings.Contains(view, s.view) {
+			t.Errorf("%s: view does not show %q", s.name, s.view)
+		}
+		if got := out.String(); !strings.Contains(got, s.sent) || (s.sent == "") != (got == "") {
+			t.Errorf("%s: got the commands %q, want %q in them", s.name, got, s.sent)
+		}
+	}
+	if strings.Contains(out.String(), "a=t") {
+		t.Error("the last step sent an image")
+	}
 }
 
 // A message shows the images that it carries. It only lists a remote image.
@@ -314,7 +478,7 @@ func TestDocumentImages(t *testing.T) {
 		t.Errorf("pictures: got %v", got)
 	}
 
-	out := renderHTML(d.root, 80, d.images)
+	out := renderHTML(d.root, 80, d.images, nil)
 	// Each 16 pixel image is 2 columns and 1 row.
 	if got := strings.Count(out, "▀"); got != 4 {
 		t.Errorf("got %d half blocks, want 4", got)

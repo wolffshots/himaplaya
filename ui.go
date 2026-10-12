@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"maps"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -154,6 +155,7 @@ type model struct {
 	cache map[string]cachedInbox // the last inbox of each account, by account name
 
 	term    terminal
+	kitty   *kitty // draws the images of the reader. nil draws half blocks.
 	viewing bool   // the sixel view shows one image of doc
 	picture int    // the index of that image in doc.pictures
 	drawn   string // the body of the sixel view
@@ -179,8 +181,13 @@ func newModel(t terminal) model {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(accent)
 
+	var k *kitty
+	if t.kitty {
+		k = &kitty{cell: t.cell, ids: map[string]int{}, out: os.Stdout}
+	}
 	return model{
 		term:   t,
+		kitty:  k,
 		keys:   newKeyMap(),
 		help:   help.New(),
 		spin:   sp,
@@ -256,7 +263,12 @@ func imagesCmd(id string, srcs []string) tea.Cmd {
 // Update sizes the panes after every message, because the error banner and the
 // full help change the body height.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	doc := m.doc
 	m, cmd := m.update(msg)
+	if m.doc != doc {
+		// The terminal keeps the images of a message until a command deletes them.
+		m.kitty.forget()
+	}
 	if m.layout() {
 		// Bubble Tea only writes the lines that changed, and a blank line that
 		// did not change keeps the pixels of the last sixel image. A clear
@@ -366,6 +378,7 @@ func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	m.err = nil
 	switch {
 	case key.Matches(msg, m.keys.Quit):
+		m.kitty.forget()
 		return m, tea.Quit
 
 	case key.Matches(msg, m.keys.Help):
@@ -397,6 +410,8 @@ func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Sixel):
 		switch {
 		case m.doc == nil:
+		case m.kitty != nil:
+			m.err = errors.New("the reader already shows each image at the full resolution")
 		case !m.term.sixel:
 			m.err = errors.New("the terminal does not report sixel support")
 		case len(m.doc.pictures()) == 0:
@@ -612,7 +627,7 @@ func (m model) readerContent() string {
 	var body string
 	switch {
 	case d.root != nil && !m.plain:
-		body = renderHTML(d.root, w, d.images)
+		body = renderHTML(d.root, w, d.images, m.kitty)
 		if n := len(d.remote); n > 0 {
 			head += fmt.Sprintf("  %d remote images, i to load", n)
 		}
@@ -622,7 +637,7 @@ func (m model) readerContent() string {
 	default:
 		// The message has no plain-text part, so remove the styles from the HTML part.
 		head += "  plain text"
-		body = ansi.Strip(renderHTML(d.root, w, nil))
+		body = ansi.Strip(renderHTML(d.root, w, nil, nil))
 	}
 	return dimStyle.Render(head) + "\n\n" + body
 }

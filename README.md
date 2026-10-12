@@ -117,6 +117,8 @@ The `password.command` value is a command that prints the password. The himalaya
 
 himaplaya draws an image with half-block characters. Each character cell shows 2 pixels, so text in an image is not readable. It decodes PNG, JPEG and GIF images.
 
+In kitty and Ghostty, himaplaya draws an image with the Kitty graphics protocol. The image shows at the full resolution, and it scrolls with the message. An image uses 297 rows at most, so a taller image shrinks. In tmux, himaplaya draws half-block characters.
+
 himaplaya shows an image that the message carries immediately. This is an inline `cid:` part or a `data:` URI.
 
 himaplaya does not load a remote image until you press `i`. A fetch tells the sender that you opened the message. Until then, a remote image shows its alt text.
@@ -125,7 +127,9 @@ himaplaya does not load a remote image until you press `i`. A fetch tells the se
 
 The `s` key shows one loaded image of the open message at the full resolution. The view needs a terminal with sixel support, such as Windows Terminal 1.22 or later. An image keeps its size, unless it must shrink to fit the window. The caption shows the size of the image and the link around it.
 
-At startup, himaplaya asks the terminal for the cell size and for sixel support. If the terminal does not report sixel support, the `s` key shows an error. If the terminal does not report a cell size, himaplaya uses 10 by 20 pixels.
+kitty and Ghostty have no sixel view. The reader already shows each image at the full resolution, and the `s` key says so.
+
+At startup, himaplaya asks the terminal for its name, for the cell size and for sixel support. If the terminal does not report sixel support, the `s` key shows an error. If the terminal does not report a cell size, himaplaya uses 10 by 20 pixels.
 
 ## Links
 
