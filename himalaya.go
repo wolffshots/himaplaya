@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"image"
 	"os/exec"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -163,11 +164,13 @@ func listAccounts(ctx context.Context) ([]account, error) {
 	return out.Accounts, err
 }
 
-func listEnvelopes(ctx context.Context, account string) ([]envelope, error) {
+// listEnvelopes lists one page of the inbox. Page 1 holds the most recent
+// envelopes. A page after the last page is empty.
+func listEnvelopes(ctx context.Context, account string, page int) ([]envelope, error) {
 	var out struct {
 		Envelopes []envelope `json:"envelopes"`
 	}
-	err := himalaya(ctx, &out, account, "envelope", "list")
+	err := himalaya(ctx, &out, account, "envelope", "list", "--page", strconv.Itoa(page))
 	return out.Envelopes, err
 }
 

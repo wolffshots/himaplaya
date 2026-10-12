@@ -169,7 +169,9 @@ const inboxTTL = 5 * time.Minute
 // cachedInbox is the last inbox that himalaya listed for an account.
 type cachedInbox struct {
 	envelopes []envelope
-	at        time.Time
+	at        time.Time // the time of the first page
+	pages     int       // the pages that envelopes holds
+	end       bool      // the page after pages is empty
 }
 
 func newModel(t terminal) model {
@@ -201,6 +203,7 @@ type accountsMsg struct {
 }
 
 type envelopesMsg struct {
+	page      int // a page after page 1 extends the inbox
 	envelopes []envelope
 	err       error
 }
@@ -222,12 +225,12 @@ func accountsCmd() tea.Msg {
 	return accountsMsg{accounts: accounts, err: err}
 }
 
-func listCmd(account string) tea.Cmd {
+func listCmd(account string, page int) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		envelopes, err := listEnvelopes(ctx, account)
-		return envelopesMsg{envelopes: envelopes, err: err}
+		envelopes, err := listEnvelopes(ctx, account, page)
+		return envelopesMsg{page: page, envelopes: envelopes, err: err}
 	}
 }
 
@@ -291,16 +294,33 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 			}
 		}
 		m.keys.Account.SetEnabled(len(m.accounts) > 1)
-		return m, listCmd(m.account)
+		return m, listCmd(m.account, 1)
 
 	case envelopesMsg:
 		m.busy = false
 		m.err = msg.err
-		if msg.err == nil {
-			// A list only runs when the model is busy, and the account cannot
-			// change in that time.
-			m.cache[m.account] = cachedInbox{envelopes: msg.envelopes, at: time.Now()}
-			m.setEnvelopes(msg.envelopes)
+		if msg.err != nil {
+			return m, nil
+		}
+		// A list only runs when the model is busy, and the account cannot
+		// change in that time.
+		c := cachedInbox{envelopes: msg.envelopes, at: time.Now(), pages: 1}
+		if msg.page > 1 {
+			c = m.cache[m.account]
+			c.pages, c.end = msg.page, len(msg.envelopes) == 0
+			// A new message moves the last envelope of each page to the next
+			// page, so skip an envelope that the inbox already shows.
+			for _, e := range msg.envelopes {
+				if !slices.ContainsFunc(c.envelopes, func(o envelope) bool { return o.ID == e.ID }) {
+					c.envelopes = append(c.envelopes, e)
+				}
+			}
+		}
+		m.cache[m.account] = c
+		m.setEnvelopes(c.envelopes)
+		if msg.page > 1 {
+			// Complete the move down that asked for the page.
+			m.inbox.MoveDown(1)
 		}
 		return m, nil
 
@@ -403,7 +423,7 @@ func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, nil
 		}
 		m.busy = true
-		return m, tea.Batch(m.spin.Tick, listCmd(m.account))
+		return m, tea.Batch(m.spin.Tick, listCmd(m.account, 1))
 
 	case key.Matches(msg, m.keys.Account):
 		if m.busy {
@@ -422,7 +442,7 @@ func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, nil
 		}
 		m.busy = true
-		return m, tea.Batch(m.spin.Tick, listCmd(m.account))
+		return m, tea.Batch(m.spin.Tick, listCmd(m.account, 1))
 
 	case key.Matches(msg, m.keys.Open):
 		i := m.inbox.Cursor()
@@ -431,6 +451,13 @@ func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 		m.busy = true
 		return m, tea.Batch(m.spin.Tick, readCmd(m.account, m.envelopes[i]))
+
+	case key.Matches(msg, m.inbox.KeyMap.LineDown, m.inbox.KeyMap.PageDown, m.inbox.KeyMap.HalfPageDown) &&
+		m.doc == nil && !m.busy && len(m.envelopes) > 0 && m.inbox.Cursor() == len(m.envelopes)-1 && !m.cache[m.account].end:
+		// A move down from the last envelope lists the next page. An inbox
+		// that shows envelopes is always in the cache.
+		m.busy = true
+		return m, tea.Batch(m.spin.Tick, listCmd(m.account, m.cache[m.account].pages+1))
 	}
 
 	var cmd tea.Cmd

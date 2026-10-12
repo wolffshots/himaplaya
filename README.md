@@ -46,6 +46,7 @@ himaplaya
 | Key | Action |
 |---|---|
 | `up`, `down`, `j`, `k` | Move in the inbox, or scroll the message |
+| `down`, `j` on the last envelope | Read the next page of the inbox |
 | `enter` | Open the selected message |
 | `esc` | Go back to the inbox |
 | `r` | Refresh the inbox |
@@ -60,7 +61,9 @@ himaplaya
 
 ## How it works
 
-The inbox comes from `himalaya --json envelope list`. himaplaya shows the first page, at the page size in the himalaya configuration.
+The inbox comes from `himalaya --json envelope list --page <n>`. himaplaya shows the first page at startup, at the page size in the himalaya configuration.
+
+A move down from the last envelope reads the next page and adds it to the inbox. The `down`, `j`, `pgdown` and `d` keys do this. The `r` key reads the first page again and drops the other pages.
 
 A message comes from `himalaya --json message read <id>`. The read does not mark the message as seen.
 
@@ -74,7 +77,7 @@ At startup, himaplaya reads the accounts from `himalaya --json account list`. Th
 
 The `tab` key shows the inbox of the next account, and the `shift+tab` key shows the inbox of the previous account. Each key closes the open message. If the himalaya configuration has one account, the keys do nothing.
 
-himaplaya keeps the last inbox of each account in memory for 5 minutes. In that time, an account switch shows the kept inbox and does not call himalaya. The `r` key always reads the inbox again.
+himaplaya keeps the last inbox of each account in memory for 5 minutes after it reads the first page. In that time, an account switch shows the kept inbox and does not call himalaya. The `r` key always reads the inbox again.
 
 himaplaya passes the account to each himalaya command with the `--account` option. It shows one account at a time.
 

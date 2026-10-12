@@ -515,6 +515,55 @@ func TestSwitchAccount(t *testing.T) {
 	}
 }
 
+// A move down from the last envelope lists the next page, and that page
+// extends the inbox.
+func TestNextPage(t *testing.T) {
+	list := func(page int, ids ...string) envelopesMsg {
+		msg := envelopesMsg{page: page}
+		for _, id := range ids {
+			msg.envelopes = append(msg.envelopes, envelope{ID: id})
+		}
+		return msg
+	}
+	down := tea.KeyMsg{Type: tea.KeyDown}
+
+	steps := []struct {
+		name string
+		msg  tea.Msg
+		want string // the envelope IDs, the cursor, the pages, busy
+	}{
+		{"first page", list(1, "4", "3"), "[4 3] 0 1 false"},
+		{"down", down, "[4 3] 1 1 false"},
+		{"down at the last envelope", down, "[4 3] 1 1 true"},
+		{"down when busy", down, "[4 3] 1 1 true"},
+		// A new message moved envelope 3 to page 2.
+		{"second page", list(2, "3", "2"), "[4 3 2] 2 2 false"},
+		{"down again", down, "[4 3 2] 2 2 true"},
+		{"error", envelopesMsg{page: 3, err: errors.New("himalaya: no connection")}, "[4 3 2] 2 2 false"},
+		{"down after the error", down, "[4 3 2] 2 2 true"},
+		{"empty page", list(3), "[4 3 2] 2 3 false"},
+		{"down after the last page", down, "[4 3 2] 2 3 false"},
+		{"refresh", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}, "[4 3 2] 2 3 true"},
+		{"first page again", list(1, "5", "4"), "[5 4] 1 1 false"},
+		{"down after the refresh", down, "[5 4] 1 1 true"},
+	}
+
+	var m tea.Model = newModel(terminal{})
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	for _, s := range steps {
+		m, _ = m.Update(s.msg)
+		mm := m.(model)
+		var ids []string
+		for _, e := range mm.envelopes {
+			ids = append(ids, e.ID)
+		}
+		got := fmt.Sprintf("%v %d %d %v", ids, mm.inbox.Cursor(), mm.cache[mm.account].pages, mm.busy)
+		if got != s.want {
+			t.Errorf("%s: got %q, want %q", s.name, got, s.want)
+		}
+	}
+}
+
 // checkSixelView checks that the image fits the frame of the sixel view. The
 // draw sequence must start at the first cell of the image and stay above the
 // footer.
