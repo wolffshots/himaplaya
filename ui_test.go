@@ -728,6 +728,26 @@ func TestNextPage(t *testing.T) {
 	}
 }
 
+// A mouse wheel sends a stream of key presses. A key press in the reader must
+// not render the inbox, or the terminal waits for seconds after a fast scroll.
+func TestKeyPressIsCheap(t *testing.T) {
+	var envelopes []envelope
+	for i := range 50 {
+		envelopes = append(envelopes, envelope{ID: fmt.Sprint(i), Subject: "subject", From: []address{{Email: "a@example.com"}}})
+	}
+	doc := &document{envelope: envelopes[0], root: parse(t, strings.Repeat("<p>"+strings.Repeat("word ", 40)+"</p>", 200))}
+
+	var m tea.Model = newModel(terminal{})
+	for _, msg := range []tea.Msg{tea.WindowSizeMsg{Width: 160, Height: 50}, envelopesMsg{page: 1, envelopes: envelopes}, messageMsg{doc: doc}} {
+		m, _ = m.Update(msg)
+	}
+	// One render of the inbox rows is about 3000 allocations. The scroll of
+	// the reader is about 300.
+	if got := testing.AllocsPerRun(100, func() { m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown}) }); got > 1000 {
+		t.Errorf("a key press in the reader makes %.0f allocations, want at most 1000", got)
+	}
+}
+
 // checkSixelView checks that the image fits the frame of the sixel view. The
 // draw sequence must start at the first cell of the image and stay above the
 // footer.

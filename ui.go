@@ -551,11 +551,13 @@ func (m *model) layout() (drew bool) {
 	_, _, _, bodyH := m.chrome()
 	h := max(bodyH-frameRows, 2)
 
-	m.inbox.SetColumns(inboxColumns(w))
-	m.inbox.SetWidth(w)
-	m.inbox.SetHeight(h)
 	if m.reader.Width != w || m.reader.Height != h {
 		m.stale = true
+		// Each of these calls renders the rows of the inbox. Only a new size
+		// needs them, or a stream of key presses makes the terminal wait.
+		m.inbox.SetColumns(inboxColumns(w))
+		m.inbox.SetWidth(w)
+		m.inbox.SetHeight(h)
 	}
 	m.reader.Width = w
 	m.reader.Height = h
