@@ -4,15 +4,42 @@ himaplaya is a Bubble Tea TUI for the [himalaya](https://github.com/pimalaya/him
 
 ## Requirements
 
-- Go 1.26
 - `himalaya` v2 on the `PATH`, with a configured account
 - A terminal with 24-bit color, to show images
+- Go 1.26, to build from source
+
+## Install
+
+### Homebrew (macOS / Linux)
+
+```sh
+brew install wolffshots/tap/himaplaya
+```
+
+The formula builds from source through [wolffshots/homebrew-tap](https://github.com/wolffshots/homebrew-tap). It also installs `himalaya`.
+
+### Scoop (Windows)
+
+```powershell
+scoop bucket add wolffshots https://github.com/wolffshots/scoop-bucket
+scoop install wolffshots/himaplaya
+```
+
+The manifest installs the release binary through [wolffshots/scoop-bucket](https://github.com/wolffshots/scoop-bucket). It does not install `himalaya`.
+
+### From source
+
+```
+go install github.com/wolffshots/himaplaya@latest
+```
 
 ## Run
 
 ```
-go run .
+himaplaya
 ```
+
+`himaplaya --version` prints the version.
 
 ## Keys
 
