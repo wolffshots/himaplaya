@@ -6,7 +6,7 @@ himaplaya is a Bubble Tea TUI for the [himalaya](https://github.com/pimalaya/him
 
 - `himalaya` v2 on the `PATH`, with a configured account
 - A terminal with 24-bit color, to show images
-- Go 1.26, to build from source
+- Go 1.26.10 or later, to build from source
 
 ## Install
 

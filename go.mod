@@ -1,6 +1,6 @@
 module github.com/wolffshots/himaplaya
 
-go 1.26.7
+go 1.26.10
 
 require (
 	github.com/charmbracelet/bubbles v1.0.0
