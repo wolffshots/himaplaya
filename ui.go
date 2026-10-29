@@ -7,6 +7,7 @@ import (
 	"image"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -57,9 +58,11 @@ type keyMap struct {
 	Open    key.Binding
 	Back    key.Binding
 	Refresh key.Binding
+	Auto    key.Binding
 	Account key.Binding
 	Plain   key.Binding
 	Images  key.Binding
+	Save    key.Binding
 	Sixel   key.Binding
 	Prev    key.Binding
 	Next    key.Binding
@@ -72,12 +75,14 @@ func newKeyMap() keyMap {
 		Open:    key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
 		Back:    key.NewBinding(key.WithKeys("esc", "backspace"), key.WithHelp("esc", "back")),
 		Refresh: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+		Auto:    key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "auto refresh")),
 		// The binding is on when himalaya lists more than one account. The
 		// shift+tab key goes to the previous account. The help does not show
 		// it, because the full help has no room for it at 80 columns.
 		Account: key.NewBinding(key.WithKeys("tab", "shift+tab"), key.WithHelp("tab", "next account"), key.WithDisabled()),
 		Plain:   key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "text/html")),
 		Images:  key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "remote images")),
+		Save:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "save attachments")),
 		Sixel:   key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sixel view")),
 		Prev:    key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("left", "previous image")),
 		Next:    key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("right", "next image")),
@@ -91,7 +96,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Open, k.Back, k.Refresh}, {k.Plain, k.Images}, {k.Sixel, k.Prev, k.Next}, {k.Account, k.Help, k.Quit}}
+	return [][]key.Binding{{k.Open, k.Back, k.Refresh}, {k.Plain, k.Images, k.Save, k.Auto}, {k.Sixel, k.Prev, k.Next}, {k.Account, k.Help, k.Quit}}
 }
 
 // ---- table -----------------------------------------------------------------
@@ -160,20 +165,28 @@ type model struct {
 	picture int    // the index of that image in doc.pictures
 	drawn   string // the body of the sixel view
 
+	auto  bool // the auto refresh is on
+	timer int  // the number of the auto refresh timer. A tick of an older timer does nothing.
+
 	busy          bool // a himalaya call or an image fetch is in flight
+	loading       bool // a list that no key asked for is in flight. It only stops another list.
 	err           error
+	note          string // the result of the last command, for the banner
 	width, height int
 }
 
 // inboxTTL is the time that an account switch can show a cached inbox.
 const inboxTTL = 5 * time.Minute
 
+// autoInterval is the time between two lists of the auto refresh.
+const autoInterval = time.Minute
+
 // cachedInbox is the last inbox that himalaya listed for an account.
 type cachedInbox struct {
 	envelopes []envelope
 	at        time.Time // the time of the first page
 	pages     int       // the pages that envelopes holds
-	end       bool      // the page after pages is empty
+	end       bool      // the last page added no envelope
 }
 
 func newModel(t terminal) model {
@@ -210,10 +223,14 @@ type accountsMsg struct {
 }
 
 type envelopesMsg struct {
-	page      int // a page after page 1 extends the inbox
+	page      int  // a page after page 1 extends the inbox
+	keep      bool // page 1 keeps the envelopes of the pages after it
 	envelopes []envelope
 	err       error
 }
+
+// autoMsg is a tick of the auto refresh. It holds the number of its timer.
+type autoMsg int
 
 type messageMsg struct {
 	doc *document
@@ -225,6 +242,11 @@ type imagesMsg struct {
 	images map[string]image.Image
 }
 
+type attachmentsMsg struct {
+	paths []string // the files that himalaya wrote
+	err   error
+}
+
 func accountsCmd() tea.Msg {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -232,13 +254,17 @@ func accountsCmd() tea.Msg {
 	return accountsMsg{accounts: accounts, err: err}
 }
 
-func listCmd(account string, page int) tea.Cmd {
+func listCmd(account string, page int, keep bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		envelopes, err := listEnvelopes(ctx, account, page)
-		return envelopesMsg{page: page, envelopes: envelopes, err: err}
+		return envelopesMsg{page: page, keep: keep, envelopes: envelopes, err: err}
 	}
+}
+
+func autoCmd(timer int) tea.Cmd {
+	return tea.Tick(autoInterval, func(time.Time) tea.Msg { return autoMsg(timer) })
 }
 
 func readCmd(account string, e envelope) tea.Cmd {
@@ -255,6 +281,16 @@ func imagesCmd(id string, srcs []string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		return imagesMsg{id: id, images: fetchImages(ctx, srcs)}
+	}
+}
+
+func attachmentsCmd(account, id string) tea.Cmd {
+	return func() tea.Msg {
+		// A large attachment needs more time than a list.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		paths, err := downloadAttachments(ctx, account, id)
+		return attachmentsMsg{paths: paths, err: err}
 	}
 }
 
@@ -275,7 +311,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// makes Bubble Tea write every line.
 		cmd = tea.Batch(cmd, tea.ClearScreen)
 	}
-	return m, cmd
+	// The check needs the inbox height that layout sets.
+	next := m.nextPage()
+	return m, tea.Batch(cmd, next)
+}
+
+// nextPage lists the next page when the inbox shows its last envelope.
+//
+// ponytail: the table does not report the rows that it shows. The check is
+// true when the last envelope is selected or when all envelopes fit. It is
+// false when a taller window shows the last envelope below the selected one.
+// The upgrade path is a table that reports its scroll offset.
+func (m *model) nextPage() tea.Cmd {
+	c, n := m.cache[m.account], len(m.envelopes)
+	// An error stops the lists until the next key press. A list that fails
+	// each time must not run in a loop.
+	if m.busy || m.loading || m.err != nil || m.doc != nil || n == 0 || c.end {
+		return nil
+	}
+	if m.inbox.Cursor() != n-1 && n > m.inbox.Height() {
+		return nil
+	}
+	// An inbox that shows envelopes is always in the cache.
+	m.loading = true
+	return tea.Batch(m.spin.Tick, listCmd(m.account, c.pages+1, false))
 }
 
 func (m model) update(msg tea.Msg) (model, tea.Cmd) {
@@ -286,7 +345,7 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		return m, nil
 
 	case spinner.TickMsg:
-		if !m.busy {
+		if !m.busy && !m.loading {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -306,33 +365,81 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 			}
 		}
 		m.keys.Account.SetEnabled(len(m.accounts) > 1)
-		return m, listCmd(m.account, 1)
+		return m, listCmd(m.account, 1, false)
 
-	case envelopesMsg:
-		m.busy = false
-		m.err = msg.err
-		if msg.err != nil {
+	case autoMsg:
+		if !m.auto || int(msg) != m.timer {
 			return m, nil
 		}
-		// A list only runs when the model is busy, and the account cannot
-		// change in that time.
+		if m.busy || m.loading {
+			return m, autoCmd(m.timer)
+		}
+		// The list is for the account that the inbox shows at this time.
+		m.loading = true
+		return m, tea.Batch(m.spin.Tick, autoCmd(m.timer), listCmd(m.account, 1, true))
+
+	case envelopesMsg:
+		if msg.page > 1 || msg.keep {
+			m.loading = false
+		} else {
+			m.busy = false
+		}
+		// A list that no key asked for must not remove the banner of a key.
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		// A list only runs when the model is busy or loading, and the account
+		// cannot change in that time.
 		c := cachedInbox{envelopes: msg.envelopes, at: time.Now(), pages: 1}
-		if msg.page > 1 {
-			c = m.cache[m.account]
-			c.pages, c.end = msg.page, len(msg.envelopes) == 0
+		old := m.cache[m.account]
+		index := func(id string) int {
+			return slices.IndexFunc(old.envelopes, func(o envelope) bool { return o.ID == id })
+		}
+		switch {
+		case msg.page > 1:
+			c = old
 			// A new message moves the last envelope of each page to the next
 			// page, so skip an envelope that the inbox already shows.
 			for _, e := range msg.envelopes {
-				if !slices.ContainsFunc(c.envelopes, func(o envelope) bool { return o.ID == e.ID }) {
+				if index(e.ID) < 0 {
 					c.envelopes = append(c.envelopes, e)
+				}
+			}
+			// The next page lists without a key press. A backend that gives
+			// the same page for each number must not make a loop.
+			c.pages, c.end = msg.page, len(c.envelopes) == len(old.envelopes)
+		case msg.keep:
+			// The old envelopes after the last envelope of the new page are
+			// the envelopes of the other pages. With no such envelope, the
+			// new page replaces the inbox.
+			for i := len(msg.envelopes) - 1; i >= 0; i-- {
+				if j := index(msg.envelopes[i].ID); j >= 0 {
+					c.envelopes = append(c.envelopes, old.envelopes[j+1:]...)
+					c.pages, c.end = old.pages, old.end
+					break
 				}
 			}
 		}
 		m.cache[m.account] = c
+
+		var selected string
+		if i := m.inbox.Cursor(); i >= 0 && i < len(m.envelopes) {
+			selected = m.envelopes[i].ID
+		}
 		m.setEnvelopes(c.envelopes)
-		if msg.page > 1 {
-			// Complete the move down that asked for the page.
-			m.inbox.MoveDown(1)
+		if !msg.keep {
+			return m, nil
+		}
+		// A new message moves each envelope down, so move the cursor with the
+		// selected envelope. SetCursor can put the cursor below the last row
+		// that the table shows.
+		if i := slices.IndexFunc(c.envelopes, func(e envelope) bool { return e.ID == selected }); i >= 0 {
+			if d := i - m.inbox.Cursor(); d > 0 {
+				m.inbox.MoveDown(d)
+			} else {
+				m.inbox.MoveUp(-d)
+			}
 		}
 		return m, nil
 
@@ -356,6 +463,22 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		}
 		return m, nil
 
+	case attachmentsMsg:
+		m.busy = false
+		m.err = msg.err
+		switch {
+		case msg.err != nil:
+		case len(msg.paths) == 0:
+			m.err = errors.New("this message has no attachment")
+		default:
+			names := make([]string, len(msg.paths))
+			for i, p := range msg.paths {
+				names[i] = filepath.Base(p)
+			}
+			m.note = "saved " + strings.Join(names, ", ") + " to " + filepath.Dir(msg.paths[0])
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -375,7 +498,7 @@ func (m *model) setEnvelopes(envelopes []envelope) {
 }
 
 func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
-	m.err = nil
+	m.err, m.note = nil, ""
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		m.kitty.forget()
@@ -433,15 +556,30 @@ func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.busy = true
 		return m, tea.Batch(m.spin.Tick, imagesCmd(m.doc.envelope.ID, m.doc.remote))
 
-	case key.Matches(msg, m.keys.Refresh):
-		if m.busy {
+	case key.Matches(msg, m.keys.Save):
+		if m.busy || m.doc == nil {
 			return m, nil
 		}
 		m.busy = true
-		return m, tea.Batch(m.spin.Tick, listCmd(m.account, 1))
+		return m, tea.Batch(m.spin.Tick, attachmentsCmd(m.account, m.doc.envelope.ID))
+
+	case key.Matches(msg, m.keys.Refresh):
+		if m.busy || m.loading {
+			return m, nil
+		}
+		m.busy = true
+		return m, tea.Batch(m.spin.Tick, listCmd(m.account, 1, false))
+
+	case key.Matches(msg, m.keys.Auto):
+		m.auto = !m.auto
+		if !m.auto {
+			return m, nil
+		}
+		m.timer++
+		return m, autoCmd(m.timer)
 
 	case key.Matches(msg, m.keys.Account):
-		if m.busy {
+		if m.busy || m.loading {
 			return m, nil
 		}
 		step := 1
@@ -457,7 +595,7 @@ func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, nil
 		}
 		m.busy = true
-		return m, tea.Batch(m.spin.Tick, listCmd(m.account, 1))
+		return m, tea.Batch(m.spin.Tick, listCmd(m.account, 1, false))
 
 	case key.Matches(msg, m.keys.Open):
 		i := m.inbox.Cursor()
@@ -466,13 +604,6 @@ func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 		m.busy = true
 		return m, tea.Batch(m.spin.Tick, readCmd(m.account, m.envelopes[i]))
-
-	case key.Matches(msg, m.inbox.KeyMap.LineDown, m.inbox.KeyMap.PageDown, m.inbox.KeyMap.HalfPageDown) &&
-		m.doc == nil && !m.busy && len(m.envelopes) > 0 && m.inbox.Cursor() == len(m.envelopes)-1 && !m.cache[m.account].end:
-		// A move down from the last envelope lists the next page. An inbox
-		// that shows envelopes is always in the cache.
-		m.busy = true
-		return m, tea.Batch(m.spin.Tick, listCmd(m.account, m.cache[m.account].pages+1))
 	}
 
 	var cmd tea.Cmd
@@ -526,13 +657,18 @@ func (m model) chrome() (top, banner, bottom string, bodyH int) {
 	if bar == "" {
 		bar = tabActiveStyle.Render("himaplaya")
 	}
-	if m.busy {
+	if m.auto {
+		bar += "  " + dimStyle.Render("auto refresh")
+	}
+	if m.busy || m.loading {
 		bar += "  " + m.spin.View()
 	}
 	top = tabBarStyle.MaxWidth(m.width).Render(bar)
 	bottom = footerStyle.Width(m.width).Render(m.help.View(m.keys))
 	if m.err != nil {
 		banner = lipgloss.NewStyle().Width(m.width).Render(errorStyle.Render("error: ") + oneLine(m.err.Error()))
+	} else if m.note != "" {
+		banner = lipgloss.NewStyle().Width(m.width).Render(oneLine(m.note))
 	}
 	bodyH = m.height - lipgloss.Height(top) - lipgloss.Height(bottom)
 	if banner != "" {

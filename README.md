@@ -46,14 +46,15 @@ himaplaya
 | Key | Action |
 |---|---|
 | `up`, `down`, `j`, `k` | Move in the inbox, or scroll the message |
-| `down`, `j` on the last envelope | Read the next page of the inbox |
 | `enter` | Open the selected message |
 | `esc` | Go back to the inbox |
 | `r` | Refresh the inbox |
+| `R` | Turn the auto refresh on or off |
 | `tab` | Show the inbox of the next account |
 | `shift+tab` | Show the inbox of the previous account |
 | `t` | Switch between the HTML part and the plain-text part |
 | `i` | Load the remote images of the open message |
+| `a` | Save the attachments of the open message |
 | `s` | Open or close the sixel view of the open message |
 | `left`, `right`, `h`, `l` | Show the previous or the next image in the sixel view |
 | `?` | Show or hide the full help |
@@ -63,13 +64,25 @@ himaplaya
 
 The inbox comes from `himalaya --json envelope list --page <n>`. himaplaya shows the first page at startup, at the page size in the himalaya configuration.
 
-A move down from the last envelope reads the next page and adds it to the inbox. The `down`, `j`, `pgdown` and `d` keys do this. The `r` key reads the first page again and drops the other pages.
+When the inbox shows its last envelope, himaplaya reads the next page and adds it to the inbox. This occurs when you select the last envelope, or when all the envelopes fit in the window. You can open a message while himaplaya reads the page. The `r` key reads the first page again and drops the other pages.
 
 A message comes from `himalaya --json message read <id>`. The read does not mark the message as seen.
 
 himaplaya renders the HTML part itself. It styles headings, bold, italic, underline, links, lists and quotes. It ignores the CSS of the mail. If the message has no HTML part, himaplaya shows the plain text.
 
 The `t` key shows the plain-text part. If the message has no plain-text part, himaplaya shows the HTML part without styles and images. The choice stays for the next message.
+
+## Auto refresh
+
+The `R` key turns the auto refresh on or off. It is off at startup. When it is on, the tab bar shows `auto refresh`.
+
+Each minute, himaplaya reads the first page of the inbox that the window shows. It does not read the inbox of another account. A new message goes to the top of the inbox. The other pages stay, and the selection stays on the same envelope.
+
+## Attachments
+
+The `a` key saves the attachments of the open message. himaplaya runs `himalaya attachment download <id>` for this. himalaya writes the files to the `downloads-dir` of its configuration, and it does not overwrite a file. himaplaya then shows the names of the files and the directory.
+
+himalaya also saves the inline parts of the message, such as the image of a signature.
 
 ## Accounts
 

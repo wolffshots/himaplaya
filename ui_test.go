@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -541,6 +542,9 @@ func TestViewFitsWindow(t *testing.T) {
 		{"reader", messageMsg{doc: doc}, "1 remote images, i to load"},
 		{"plain text", key("t"), "plain text"},
 		{"html", key("t"), "word word"},
+		{"attachments saved", attachmentsMsg{paths: []string{filepath.Join("downloads", "a.pdf"), filepath.Join("downloads", "b.png")}}, "saved a.pdf, b.png to downloads"},
+		{"no attachment", attachmentsMsg{}, "this message has no attachment"},
+		{"auto refresh on", key("R"), "auto refresh"},
 		{"no image for sixel", key("s"), "this message has no loaded image"},
 		{"images loaded", imagesMsg{id: "1", images: map[string]image.Image{"https://example.com/a.png": large}}, "a@example.com  Oct"},
 		{"sixel view", key("s"), "Image 1 of 1"},
@@ -610,10 +614,14 @@ func TestSwitchAccount(t *testing.T) {
 	}{
 		{"accounts", accountsMsg{accounts: []account{{Name: "work"}, {Name: "home", Default: true}}}, "home 0 false true"},
 		{"inbox", envelopesMsg{envelopes: []envelope{e, e}}, "home 2 false false"},
+		// The window has room for more envelopes, so the next page is in flight.
+		{"switch when loading", tab, "home 2 false false"},
+		{"last page", envelopesMsg{page: 2}, "home 2 false false"},
 		{"reader", messageMsg{doc: &document{envelope: e, text: "hi"}}, "home 2 true false"},
 		{"switch", tab, "work 0 false true"},
 		{"switch when busy", tab, "work 0 false true"},
 		{"next inbox", envelopesMsg{envelopes: []envelope{e}}, "work 1 false false"},
+		{"last page of the next inbox", envelopesMsg{page: 2}, "work 1 false false"},
 		{"cached", tab, "home 2 false false"},
 		{"cached again", tab, "work 1 false false"},
 	}
@@ -650,6 +658,7 @@ func TestSwitchAccount(t *testing.T) {
 	if got := m.(model).inbox.Cursor(); got != 0 || state(m) != "work 2 false false" {
 		t.Errorf("new inbox: got cursor %d and %q", got, state(m))
 	}
+	m, _ = m.Update(envelopesMsg{page: 2})
 	// The refresh key lists a cached inbox again.
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
 	if got := state(m); got != "work 2 false true" {
@@ -679,51 +688,182 @@ func TestSwitchAccount(t *testing.T) {
 	}
 }
 
-// A move down from the last envelope lists the next page, and that page
+// ids returns the envelope IDs of the inbox.
+func ids(m model) []string {
+	var out []string
+	for _, e := range m.envelopes {
+		out = append(out, e.ID)
+	}
+	return out
+}
+
+// list returns the result of a list of one page.
+func list(page int, ids ...string) envelopesMsg {
+	msg := envelopesMsg{page: page}
+	for _, id := range ids {
+		msg.envelopes = append(msg.envelopes, envelope{ID: id})
+	}
+	return msg
+}
+
+// The inbox lists the next page when it shows its last envelope, and that page
 // extends the inbox.
 func TestNextPage(t *testing.T) {
-	list := func(page int, ids ...string) envelopesMsg {
-		msg := envelopesMsg{page: page}
-		for _, id := range ids {
-			msg.envelopes = append(msg.envelopes, envelope{ID: id})
-		}
-		return msg
-	}
-	down := tea.KeyMsg{Type: tea.KeyDown}
+	up, down := tea.KeyMsg{Type: tea.KeyUp}, tea.KeyMsg{Type: tea.KeyDown}
 
 	steps := []struct {
 		name string
 		msg  tea.Msg
-		want string // the envelope IDs, the cursor, the pages, busy
+		want string // the envelope IDs, the cursor, the pages, busy, loading
 	}{
-		{"first page", list(1, "4", "3"), "[4 3] 0 1 false"},
-		{"down", down, "[4 3] 1 1 false"},
-		{"down at the last envelope", down, "[4 3] 1 1 true"},
-		{"down when busy", down, "[4 3] 1 1 true"},
-		// A new message moved envelope 3 to page 2.
-		{"second page", list(2, "3", "2"), "[4 3 2] 2 2 false"},
-		{"down again", down, "[4 3 2] 2 2 true"},
-		{"error", envelopesMsg{page: 3, err: errors.New("himalaya: no connection")}, "[4 3 2] 2 2 false"},
-		{"down after the error", down, "[4 3 2] 2 2 true"},
-		{"empty page", list(3), "[4 3 2] 2 3 false"},
-		{"down after the last page", down, "[4 3 2] 2 3 false"},
-		{"refresh", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}, "[4 3 2] 2 3 true"},
-		{"first page again", list(1, "5", "4"), "[5 4] 1 1 false"},
-		{"down after the refresh", down, "[5 4] 1 1 true"},
+		{"first page", list(1, "6", "5", "4"), "[6 5 4] 0 1 false false"},
+		{"down", down, "[6 5 4] 1 1 false false"},
+		{"down to the last envelope", down, "[6 5 4] 2 1 false true"},
+		{"refresh when loading", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}, "[6 5 4] 2 1 false true"},
+		// A new message moved envelope 4 to page 2.
+		{"second page", list(2, "4", "3"), "[6 5 4 3] 2 2 false false"},
+		{"down again", down, "[6 5 4 3] 3 2 false true"},
+		{"error", envelopesMsg{page: 3, err: errors.New("himalaya: no connection")}, "[6 5 4 3] 3 2 false false"},
+		{"up after the error", up, "[6 5 4 3] 2 2 false false"},
+		{"down after the error", down, "[6 5 4 3] 3 2 false true"},
+		// The reader hides the inbox.
+		{"reader", messageMsg{doc: &document{envelope: envelope{ID: "3"}, text: "hi"}}, "[6 5 4 3] 3 2 false true"},
+		{"page with no new envelope", list(3, "3"), "[6 5 4 3] 3 3 false false"},
+		{"inbox", tea.KeyMsg{Type: tea.KeyEsc}, "[6 5 4 3] 3 3 false false"},
+		{"refresh", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}, "[6 5 4 3] 3 3 true false"},
+		// The 2 rows of the inbox show all the envelopes.
+		{"first page again", list(1, "7", "6"), "[7 6] 1 1 false true"},
+		{"second page again", list(2, "5"), "[7 6 5] 1 2 false false"},
+		{"reader at the last envelope", messageMsg{doc: &document{envelope: envelope{ID: "5"}, text: "hi"}}, "[7 6 5] 1 2 false false"},
+		{"down in the reader", down, "[7 6 5] 1 2 false false"},
 	}
 
 	var m tea.Model = newModel(terminal{})
-	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	// This window gives the inbox 2 rows.
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 10})
 	for _, s := range steps {
 		m, _ = m.Update(s.msg)
 		mm := m.(model)
-		var ids []string
-		for _, e := range mm.envelopes {
-			ids = append(ids, e.ID)
-		}
-		got := fmt.Sprintf("%v %d %d %v", ids, mm.inbox.Cursor(), mm.cache[mm.account].pages, mm.busy)
+		got := fmt.Sprintf("%v %d %d %v %v", ids(mm), mm.inbox.Cursor(), mm.cache[mm.account].pages, mm.busy, mm.loading)
 		if got != s.want {
 			t.Errorf("%s: got %q, want %q", s.name, got, s.want)
+		}
+	}
+}
+
+// The auto refresh lists the first page of the account that the inbox shows.
+// It keeps the other pages and the selected envelope.
+func TestAutoRefresh(t *testing.T) {
+	down := tea.KeyMsg{Type: tea.KeyDown}
+	toggle := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")}
+	first := func(ids ...string) envelopesMsg {
+		msg := list(1, ids...)
+		msg.keep = true
+		return msg
+	}
+
+	steps := []struct {
+		name string
+		msg  tea.Msg
+		want string // the envelope IDs, the selected envelope, the pages, loading
+	}{
+		{"first page", list(1, "5", "4", "3"), "[5 4 3] 5 1 false"},
+		{"tick when off", autoMsg(0), "[5 4 3] 5 1 false"},
+		{"down", down, "[5 4 3] 4 1 false"},
+		{"on", toggle, "[5 4 3] 4 1 false"},
+		{"tick", autoMsg(1), "[5 4 3] 4 1 true"},
+		// The selected envelope goes below the 2 rows that the inbox showed.
+		{"new message", first("6", "5", "4"), "[6 5 4 3] 4 1 false"},
+		{"down to the last envelope", down, "[6 5 4 3] 3 1 true"},
+		{"tick when loading", autoMsg(1), "[6 5 4 3] 3 1 true"},
+		{"second page", list(2, "2", "1"), "[6 5 4 3 2 1] 3 2 false"},
+		{"off", toggle, "[6 5 4 3 2 1] 3 2 false"},
+		{"tick after off", autoMsg(1), "[6 5 4 3 2 1] 3 2 false"},
+		{"on again", toggle, "[6 5 4 3 2 1] 3 2 false"},
+		{"tick of the old timer", autoMsg(1), "[6 5 4 3 2 1] 3 2 false"},
+		{"tick of the new timer", autoMsg(2), "[6 5 4 3 2 1] 3 2 true"},
+		// Another client deleted envelope 5.
+		{"new and deleted messages", first("7", "6", "4"), "[7 6 4 3 2 1] 3 2 false"},
+		{"tick again", autoMsg(2), "[7 6 4 3 2 1] 3 2 true"},
+		// No envelope of the new page is in the inbox, so the page replaces it.
+		// The cursor goes to the last envelope, and that lists the next page.
+		{"more than a page of new messages", first("20", "19", "18"), "[20 19 18] 18 1 true"},
+		{"error", envelopesMsg{page: 2, err: errors.New("himalaya: no connection")}, "[20 19 18] 18 1 false"},
+		{"tick after the error", autoMsg(2), "[20 19 18] 18 1 true"},
+	}
+
+	var m tea.Model = newModel(terminal{})
+	// This window gives the inbox 2 rows.
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 10})
+	for _, s := range steps {
+		m, _ = m.Update(s.msg)
+		mm := m.(model)
+		selected := mm.envelopes[mm.inbox.Cursor()].ID
+		got := fmt.Sprintf("%v %s %d %v", ids(mm), selected, mm.cache[mm.account].pages, mm.loading)
+		if got != s.want {
+			t.Errorf("%s: got %q, want %q", s.name, got, s.want)
+		}
+		// The 2 rows must show the selected envelope. An ID is the first cell
+		// of a row. The error banner leaves no row in this window.
+		view := ansi.Strip(mm.inbox.View())
+		if mm.err == nil && !strings.Contains(view, "\n "+selected+" ") {
+			t.Errorf("%s: the inbox does not show the selected envelope %s:\n%s", s.name, selected, view)
+		}
+		if on := strings.Contains(ansi.Strip(m.View()), "auto refresh"); on != mm.auto {
+			t.Errorf("%s: the tab bar shows the auto refresh as %v, want %v", s.name, on, mm.auto)
+		}
+	}
+
+	// The tick lists the account that the inbox shows.
+	m = newModel(terminal{})
+	for _, msg := range []tea.Msg{
+		tea.WindowSizeMsg{Width: 80, Height: 10},
+		accountsMsg{accounts: []account{{Name: "work"}, {Name: "home", Default: true}}},
+		envelopesMsg{},
+		toggle,
+		tea.KeyMsg{Type: tea.KeyTab},
+		envelopesMsg{},
+		autoMsg(1),
+		first("9"),
+	} {
+		m, _ = m.Update(msg)
+	}
+	if mm := m.(model); fmt.Sprint(ids(mm), len(mm.cache["work"].envelopes), len(mm.cache["home"].envelopes)) != "[9] 1 0" {
+		t.Errorf("tick after a switch: got the inbox %v of %q", ids(mm), mm.account)
+	}
+}
+
+// The a key saves the attachments of the open message. The full help shows
+// each key at 80 columns.
+func TestSaveKey(t *testing.T) {
+	save := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")}
+	var m tea.Model = newModel(terminal{})
+	for _, msg := range []tea.Msg{
+		tea.WindowSizeMsg{Width: 80, Height: 24},
+		accountsMsg{accounts: []account{{Name: "work"}, {Name: "home", Default: true}}},
+		envelopesMsg{},
+		save,
+	} {
+		m, _ = m.Update(msg)
+	}
+	if m.(model).busy {
+		t.Error("the a key started a download with no open message")
+	}
+	m, _ = m.Update(messageMsg{doc: &document{envelope: envelope{ID: "1"}, text: "hi"}})
+	m, cmd := m.Update(save)
+	if !m.(model).busy || cmd == nil {
+		t.Error("the a key did not start a download")
+	}
+	m, _ = m.Update(attachmentsMsg{err: errors.New("himalaya: no connection")})
+	if view := m.View(); m.(model).busy || !strings.Contains(view, "no connection") {
+		t.Error("the view does not show the error of the download")
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	view := m.View()
+	for _, want := range []string{"save attachments", "auto refresh", "next account", "quit"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("the full help does not show %q", want)
 		}
 	}
 }

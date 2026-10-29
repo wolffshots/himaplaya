@@ -184,6 +184,26 @@ func readMessage(ctx context.Context, account string, e envelope) (*document, er
 	return newDocument(e, m)
 }
 
+// downloadAttachments writes each attachment of a message to the downloads
+// directory of the himalaya configuration. It returns the path of each file.
+//
+// ponytail: himalaya also writes the inline parts, such as the image of a
+// signature. The upgrade path is to pass the IDs that `attachment list` does
+// not mark as inline.
+func downloadAttachments(ctx context.Context, account, id string) ([]string, error) {
+	var out struct {
+		Attachments []struct {
+			Path string `json:"path"`
+		} `json:"attachments"`
+	}
+	err := himalaya(ctx, &out, account, "attachment", "download", id)
+	var paths []string
+	for _, a := range out.Attachments {
+		paths = append(paths, a.Path)
+	}
+	return paths, err
+}
+
 // newDocument parses the HTML part and decodes the images that the message
 // carries. It only lists the remote images. The reader fetches them on request,
 // because a fetch tells the sender that the user opened the message.
