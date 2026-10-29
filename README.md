@@ -1,5 +1,8 @@
 # himaplaya
 
+> [!WARNING]
+> himaplaya is deprecated and the repository is archived. It gets no more fixes or releases. Use [matcha](https://github.com/floatpane/matcha) as a terminal mail client instead.
+
 himaplaya is a Bubble Tea TUI for the [himalaya](https://github.com/pimalaya/himalaya) mail client. It lists the inbox envelopes and opens a selected message as styled text with images. This is a proof of concept.
 
 ## Requirements
